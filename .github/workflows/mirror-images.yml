@@ -1,0 +1,68 @@
+name: Mirror Bottle images to public packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish for the public duplicates
+        required: true
+        default: 0.1.0-f63fe8c
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            src: ghcr.io/cicadialabs/bottle-backend
+            dst: ghcr.io/cicadialabs/bottle-backend-public
+            digest: sha256:8ee749ad914b30d9f44072656e44d8d02a3eb45ffd958a06ae77e1d3a8c1b3ed
+          - name: frontend
+            src: ghcr.io/cicadialabs/bottle-frontend
+            dst: ghcr.io/cicadialabs/bottle-frontend-public
+            digest: sha256:d3871853af5a0b96cf1575b76d2ff3140d2561abfd121454808298fd6e2d0579
+    steps:
+      - name: Ensure skopeo
+        run: |
+          command -v skopeo >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+
+      - name: Copy image into public package (digest-pinned, multi-arch preserved)
+        env:
+          SRC_USER: ${{ secrets.MIRROR_GHCR_USER }}
+          SRC_TOKEN: ${{ secrets.MIRROR_GHCR_TOKEN }}
+          DST_USER: ${{ github.actor }}
+          DST_TOKEN: ${{ github.token }}
+          SRC: ${{ matrix.src }}
+          DST: ${{ matrix.dst }}
+          DIGEST: ${{ matrix.digest }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          skopeo copy --all --retry-times 3 \
+            --src-creds "$SRC_USER:$SRC_TOKEN" \
+            --dest-creds "$DST_USER:$DST_TOKEN" \
+            "docker://$SRC@$DIGEST" \
+            "docker://$DST:$TAG"
+
+      - name: Verify pushed digest matches source
+        env:
+          DST_USER: ${{ github.actor }}
+          DST_TOKEN: ${{ github.token }}
+          DST: ${{ matrix.dst }}
+          DIGEST: ${{ matrix.digest }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          GOT=$(skopeo inspect --creds "$DST_USER:$DST_TOKEN" --format '{{.Digest}}' "docker://$DST:$TAG")
+          echo "Pushed manifest digest: $GOT"
+          if [ "$GOT" != "$DIGEST" ]; then
+            echo "::error::Digest mismatch: expected $DIGEST, got $GOT"
+            exit 1
+          fi
+          echo "Digest verified: public copy is identical to the source image."
